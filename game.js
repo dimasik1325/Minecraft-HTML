@@ -12,6 +12,9 @@ const GRAVITY = 28;
 const JUMP_FORCE = 9.2;
 const WALK_SPEED = 4.6;
 const SPRINT_SPEED = 7.5;
+const INTERACTION_RANGE = 5; // требуемая дальность взаимодействия
+const WORLD_MIN_Y = -2;
+const WORLD_MAX_Y = 32;
 
 // ---------- BLOCK TYPES ----------
 const BLOCKS = {
@@ -22,8 +25,18 @@ const BLOCKS = {
   wood: { id: 'wood', name: 'Дерево', colorSide: '#8d6e3f', colorTop: '#6d4c1d', colorBottom: '#6d4c1d', icon: '#8d6e3f' },
   leaves: { id: 'leaves', name: 'Листва', color: '#3a9d23', icon: '#3a9d23' },
   water: { id: 'water', name: 'Вода', color: '#3a7bff', icon: '#3a7bff' },
+  bedrock: { id: 'bedrock', name: 'Бедрок', color: '#2b2b2b', icon: '#2b2b2b', unbreakable: true },
 };
 const BLOCK_LIST = [BLOCKS.grass, BLOCKS.dirt, BLOCKS.stone, BLOCKS.sand, BLOCKS.wood, BLOCKS.leaves, BLOCKS.water];
+// Отдельный флаг неразрушимости — используется в системе ломания
+function isUnbreakable(type){ return BLOCKS[type]?.unbreakable === true; }
+function isInsideWorld(x, y, z) {
+  const half = Math.floor(WORLD_SIZE / 2);
+  return Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z)
+    && x >= -half && x < half
+    && z >= -half && z < half
+    && y >= WORLD_MIN_Y && y <= WORLD_MAX_Y;
+}
 
 // ---------- TEXTURE GENERATOR ----------
 function makeTexture(baseColor, type = 'solid') {
@@ -278,6 +291,26 @@ const clouds = createClouds();
   scene.add(plane2);
 })();
 
+// ---------- BEDROCK TEXTURE ----------
+function makeBedrockTexture(){
+  const size = 64;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#2b2b2b'; ctx.fillRect(0,0,size,size);
+  // noise speckles
+  for(let i=0;i<140;i++){
+    const x=Math.random()*size, y=Math.random()*size;
+    ctx.fillStyle = Math.random()<0.5 ? 'rgba(80,80,80,0.9)' : 'rgba(15,15,15,0.9)';
+    ctx.fillRect(x,y,2,2);
+  }
+  ctx.strokeStyle='rgba(0,0,0,0.45)'; ctx.lineWidth=2; ctx.strokeRect(0,0,size,size);
+  for(let i=0;i<size;i+=16){ ctx.strokeStyle='rgba(255,255,255,0.05)'; ctx.strokeRect(i,0,0.5,size); ctx.strokeRect(0,i,size,0.5); }
+  const tex=new THREE.CanvasTexture(c);
+  tex.magFilter=THREE.NearestFilter; tex.minFilter=THREE.NearestFilter; tex.colorSpace=THREE.SRGBColorSpace;
+  return tex;
+}
+
 // ---------- MATERIALS ----------
 const textures = {
   grassTop: makeTexture('#5db747'),
@@ -289,6 +322,7 @@ const textures = {
   woodTop: makeWoodTopTexture(),
   leaves: makeTexture('#3a9d23'),
   water: makeTexture('#3a7bff', 'water'),
+  bedrock: makeBedrockTexture(),
 };
 
 function getMaterialsForBlock(type) {
@@ -318,6 +352,7 @@ function getMaterialsForBlock(type) {
     sand: textures.sand,
     leaves: textures.leaves,
     water: textures.water,
+    bedrock: textures.bedrock,
   };
   const tex = mapByType[type];
   if (!tex) return new THREE.MeshLambertMaterial({ color: 0xffffff });
@@ -353,37 +388,39 @@ function isSolid(x, y, z) {
   return true;
 }
 
-// Create block mesh
+// Create block mesh; central guards keep world data, meshes, raycasts and collision in sync.
 function createBlockMesh(bx, by, bz, type) {
-  let mats = getMaterialsForBlock(type);
-  let mesh;
-  if (Array.isArray(mats)) {
-    mesh = new THREE.Mesh(blockGeo, mats);
-  } else {
-    mesh = new THREE.Mesh(blockGeo, mats);
-  }
-  // Single material vs array: Three handles both
-  if (!Array.isArray(mats)) {
-    mesh.material = mats;
-  }
+  const blockKey = key(bx, by, bz);
+  if (!isInsideWorld(bx, by, bz) || world.has(blockKey)) return null;
+
+  const mats = getMaterialsForBlock(type);
+  const mesh = new THREE.Mesh(blockGeo, mats);
   mesh.position.set(bx + 0.5, by + 0.5, bz + 0.5);
+  mesh.updateMatrixWorld(true);
   mesh.castShadow = type !== 'water' && type !== 'leaves';
   mesh.receiveShadow = true;
   mesh.userData = { bx, by, bz, type };
   scene.add(mesh);
-  world.set(key(bx, by, bz), { type, mesh });
+  world.set(blockKey, { type, mesh });
   worldMeshes.push(mesh);
   return mesh;
+}
+
+function disposeBlockMaterials(mesh) {
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  // Materials are per block; textures and blockGeo are shared and must stay alive.
+  for (const material of new Set(materials)) material?.dispose();
 }
 
 function removeBlockMesh(bx, by, bz) {
   const k = key(bx, by, bz);
   const entry = world.get(k);
-  if (!entry) return false;
+  if (!entry || isUnbreakable(entry.type)) return false;
   scene.remove(entry.mesh);
   const idx = worldMeshes.indexOf(entry.mesh);
   if (idx !== -1) worldMeshes.splice(idx, 1);
-  // geometry is shared (blockGeo) - don't dispose
+  disposeBlockMaterials(entry.mesh);
+  // blockGeo and canvas textures are shared; do not dispose them here.
   world.delete(k);
   return true;
 }
@@ -423,8 +460,11 @@ function fbm(x, z) {
 
 // ---------- WORLD GENERATION ----------
 function generateWorld() {
-  // clear existing
-  for (const [, entry] of world) scene.remove(entry.mesh);
+  // clear existing meshes/materials without disposing shared geometry or textures
+  for (const [, entry] of world) {
+    scene.remove(entry.mesh);
+    disposeBlockMaterials(entry.mesh);
+  }
   world.clear();
   worldMeshes.length = 0;
 
@@ -481,6 +521,16 @@ function generateWorld() {
           }
         }
       }
+    }
+  }
+  // bedrock layer — неразрушимый фундамент мира (для теста механики неразрушимых блоков)
+  for (let x = -half; x < half; x++) {
+    for (let z = -half; z < half; z++) {
+      createBlockMesh(x, WORLD_MIN_Y, z, 'bedrock');
+      // optional second layer at WORLD_MIN_Y+1 for extra safety at edges (необязательно)
+      // создаём только по границе, чтобы не закрывать ландшафт
+      const onBorder = x === -half || x === half-1 || z === -half || z === half-1;
+      if (onBorder) createBlockMesh(x, WORLD_MIN_Y+1, z, 'bedrock');
     }
   }
 
@@ -557,22 +607,38 @@ const player = {
   onGround: false,
 };
 
-// find spawn safe position: highest block at 0,0 + 2
+// Find a clear spawn above a solid surface. player.pos is the camera/eye position.
 function findSpawn() {
-  for (let y = 20; y >= 0; y--) {
-    if (isSolid(0, y, 8) || isSolid(0, y, 0)) {
-      // find open
+  const half = Math.floor(WORLD_SIZE / 2);
+  const findInColumn = (x, z) => {
+    for (let groundY = WORLD_MAX_Y; groundY >= WORLD_MIN_Y; groundY--) {
+      if (!isSolid(x, groundY, z)) continue;
+      const spawnX = x + 0.5;
+      const spawnZ = z + 0.5;
+      const eyeY = groundY + 1 + PLAYER_EYE_HEIGHT + 0.04;
+      if (!isColliding(spawnX, eyeY, spawnZ)) return { x: spawnX, y: eyeY, z: spawnZ };
+    }
+    return null;
+  };
+
+  const preferredColumns = [[2, 6], [0, 8], [0, 0], [2, 2], [-2, 6]];
+  let spawn = null;
+  for (const [x, z] of preferredColumns) {
+    spawn = findInColumn(x, z);
+    if (spawn) break;
+  }
+  // Fallback for future terrain changes: find any walkable column away from the world edge.
+  if (!spawn) {
+    for (let x = -half + 1; x < half - 1 && !spawn; x++) {
+      for (let z = -half + 1; z < half - 1 && !spawn; z++) {
+        spawn = findInColumn(x, z);
+      }
     }
   }
-  // scan column at 0,8
-  let spawnY = 0;
-  for (let y = 15; y >= 0; y--) {
-    if (getBlock(0, y, 8)) spawnY = y + 2;
-  }
-  // fallback
-  if (spawnY < 2) spawnY = 10;
-  player.pos.set(2, spawnY + 1.5, 6);
+
+  player.pos.set(spawn?.x ?? 0.5, spawn?.y ?? (WORLD_MAX_Y - 1), spawn?.z ?? 0.5);
   player.vel.set(0, 0, 0);
+  player.onGround = false;
 }
 findSpawn();
 
@@ -592,6 +658,7 @@ window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
 let mouseSensitivity = 0.0022;
 let isPointerLocked = false;
+let mouseDownLeft = false, mouseDownRight = false;
 
 renderer.domElement.addEventListener('click', () => {
   if (!isPointerLocked && !menuVisible) {
@@ -600,6 +667,11 @@ renderer.domElement.addEventListener('click', () => {
 });
 document.addEventListener('pointerlockchange', () => {
   isPointerLocked = document.pointerLockElement === renderer.domElement;
+  if (!isPointerLocked) {
+    mouseDownLeft = false;
+    mouseDownRight = false;
+    for (const code of Object.keys(keys)) keys[code] = false;
+  }
   document.getElementById('pause-msg').classList.toggle('visible', !isPointerLocked && !menuVisible);
   document.getElementById('hint').classList.toggle('visible', isPointerLocked);
 });
@@ -690,126 +762,326 @@ window.addEventListener('wheel', (e) => {
   selectSlot(next);
 });
 
-// ---------- HIGHLIGHT BOX ----------
+// ---------- HIGHLIGHT BOX (визуальное выделение) ----------
 const highlightGeo = new THREE.BoxGeometry(1.01, 1.01, 1.01);
-const highlightMat = new THREE.MeshBasicMaterial({ color: 0x000000, wireframe: false, transparent: true, opacity: 0.0 });
+const highlightFillMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.10, depthTest: false });
+const highlightFill = new THREE.Mesh(highlightGeo, highlightFillMat);
+highlightFill.visible = false;
+highlightFill.renderOrder = 999;
+scene.add(highlightFill);
 const highlightEdges = new THREE.EdgesGeometry(highlightGeo);
-const highlightLineMat = new THREE.LineBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.95 });
+const highlightLineMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.95, depthTest: false });
 const highlightBox = new THREE.LineSegments(highlightEdges, highlightLineMat);
 highlightBox.visible = false;
+highlightBox.renderOrder = 1000;
 scene.add(highlightBox);
 
-// Use raycaster for block selection
+// Use raycaster for block selection — определяет блок под прицелом строго через Three.js Raycaster
 const raycaster = new THREE.Raycaster();
 const center = new THREE.Vector2(0, 0);
-let currentHit = null; // {bx,by,bz, faceNormal, point, distance, mesh}
+let currentHit = null; // {bx,by,bz, faceNormal, point, distance, mesh, type}
 
 function updateRaycast() {
+  const hudTarget = document.getElementById('hud-target');
   if (menuVisible || worldMeshes.length === 0) {
     highlightBox.visible = false;
+    highlightFill.visible = false;
     currentHit = null;
+    if (hudTarget) { hudTarget.textContent = '—'; hudTarget.style.color = ''; }
     return;
   }
+  // Camera transforms change with mouse-look; keep the ray aligned before casting.
+  camera.updateMatrixWorld(true);
   raycaster.setFromCamera(center, camera);
-  raycaster.far = 7; // reach distance
+  raycaster.far = INTERACTION_RANGE; // ограничение дальности 5 блоков
   const hits = raycaster.intersectObjects(worldMeshes, false);
   if (hits.length === 0) {
     highlightBox.visible = false;
+    highlightFill.visible = false;
     currentHit = null;
+    if (hudTarget) { hudTarget.textContent = '—'; hudTarget.style.color = ''; }
     return;
   }
   const hit = hits[0];
-  // ignore water for selection? Actually allow breaking water? We'll allow but highlight
-  // but if water, we still show
   const mesh = hit.object;
-  const { bx, by, bz } = mesh.userData;
+  const { bx, by, bz, type } = mesh.userData;
   highlightBox.position.set(bx + 0.5, by + 0.5, bz + 0.5);
+  highlightFill.position.set(bx + 0.5, by + 0.5, bz + 0.5);
   highlightBox.visible = true;
+  highlightFill.visible = true;
+  // цвет выделения: красный для неразрушимых
+  const unbreak = isUnbreakable(type);
+  highlightLineMat.color.setHex(unbreak ? 0xff3344 : 0x111111);
+  highlightFillMat.color.setHex(unbreak ? 0xff3344 : 0x000000);
+  highlightFillMat.opacity = unbreak ? 0.18 : 0.10;
   // get face normal for placement
-  // hit.face.normal is in local space; transform to world
   const normalMatrix = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
   const worldNormal = hit.face.normal.clone().applyMatrix3(normalMatrix).normalize();
-  // snap to axis
   const faceNormal = new THREE.Vector3(
     Math.round(worldNormal.x),
     Math.round(worldNormal.y),
     Math.round(worldNormal.z)
   );
-  currentHit = { bx, by, bz, faceNormal, point: hit.point.clone(), distance: hit.distance, mesh };
+  currentHit = { bx, by, bz, type, faceNormal, point: hit.point.clone(), distance: hit.distance, mesh };
+  if (hudTarget) {
+    const dist = hit.distance.toFixed(1);
+    hudTarget.textContent = `${type} ${bx},${by},${bz} [${dist}м]${unbreak ? ' ⛔' : ''}`;
+    hudTarget.style.color = unbreak ? '#ff6666' : '#7cfc00';
+  }
 }
 
-// ---------- BLOCK INTERACTION ----------
+// ---------- PARTICLES ПРИ РАЗРУШЕНИИ ----------
+const particles = [];
+const particleGeo = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+function spawnBreakParticles(bx, by, bz, type){
+  // цвет частицы по типу блока
+  const colorMap = {
+    grass: 0x5db747, dirt: 0x8b5a2b, stone: 0x9e9e9e, sand: 0xe8d9a5,
+    wood: 0x8d6e3f, leaves: 0x3a9d23, water: 0x3a7bff, bedrock: 0x333333
+  };
+  const col = new THREE.Color(colorMap[type] || 0xffffff);
+  for(let i=0;i<12;i++){
+    const mat = new THREE.MeshLambertMaterial({ color: col.clone().multiplyScalar(0.85 + Math.random()*0.3), transparent:true, opacity:1 });
+    const m = new THREE.Mesh(particleGeo, mat);
+    m.position.set(bx+0.5, by+0.5, bz+0.5);
+    m.castShadow = false;
+    m.receiveShadow = false;
+    const vel = new THREE.Vector3(
+      (Math.random()-0.5)*6,
+      Math.random()*5 + 1,
+      (Math.random()-0.5)*6
+    );
+    // небольшой импульс в сторону камеры для эффекта
+    if(currentHit){
+      vel.addScaledVector(currentHit.faceNormal, -0.8);
+    }
+    scene.add(m);
+    particles.push({ mesh:m, vel, life:0.55 + Math.random()*0.25, age:0, spin: new THREE.Vector3((Math.random()-0.5)*10, (Math.random()-0.5)*10, (Math.random()-0.5)*10) });
+  }
+}
+function updateParticles(dt){
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.age += dt;
+    p.life -= dt;
+    // гравитация
+    p.vel.y -= 12 * dt;
+    p.mesh.position.addScaledVector(p.vel, dt);
+    p.vel.multiplyScalar(0.985);
+    p.mesh.rotation.x += p.spin.x * dt;
+    p.mesh.rotation.y += p.spin.y * dt;
+    p.mesh.rotation.z += p.spin.z * dt;
+    if(p.mesh.material) p.mesh.material.opacity = Math.max(0, p.life*1.8);
+    if(p.life <= 0){
+      scene.remove(p.mesh);
+      if(p.mesh.material) p.mesh.material.dispose();
+      particles.splice(i,1);
+    }
+  }
+}
+
+// ---------- SOUND (Web Audio) С ВОЗМОЖНОСТЬЮ ОТКЛЮЧЕНИЯ ----------
+let audioCtx = null;
+let soundEnabled = true;
+function initAudio(){
+  if(audioCtx) return;
+  try{
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }catch(e){ console.warn('AudioContext not supported', e); }
+}
+function ensureAudio(){
+  if(!audioCtx) initAudio();
+  if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
+}
+function updateSoundUI(){
+  const btn = document.getElementById('soundToggle');
+  if(!btn) return;
+  btn.textContent = soundEnabled ? '🔊 Звук: вкл' : '🔇 Звук: выкл';
+  btn.classList.toggle('muted', !soundEnabled);
+}
+function toggleSound(){
+  soundEnabled = !soundEnabled;
+  updateSoundUI();
+  if(soundEnabled) ensureAudio();
+  else if(audioCtx?.state === 'running') audioCtx.suspend().catch(()=>{});
+}
+document.getElementById('soundToggle')?.addEventListener('click', (e)=>{
+  e.stopPropagation();
+  toggleSound();
+});
+updateSoundUI();
+window.addEventListener('keydown', (e)=>{
+  if(e.code === 'KeyM' && !e.repeat){
+    toggleSound();
+  }
+});
+function playBreakSound(type){
+  if(!soundEnabled) return;
+  ensureAudio();
+  if(!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const master = audioCtx.createGain();
+  master.gain.value = 0.5;
+  master.connect(audioCtx.destination);
+  // низкочастотный удар
+  const osc = audioCtx.createOscillator();
+  osc.type='square';
+  osc.frequency.setValueAtTime(180, t);
+  osc.frequency.exponentialRampToValueAtTime(50, t+0.14);
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.45, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t+0.18);
+  osc.connect(gain); gain.connect(master);
+  osc.start(t); osc.stop(t+0.18);
+  // шумовой щелчок: буфер
+  const len = Math.floor(audioCtx.sampleRate*0.08);
+  const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for(let i=0;i<len;i++) data[i]=(Math.random()*2-1)*Math.pow(1 - i/len, 2);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const f = audioCtx.createBiquadFilter();
+  f.type='highpass'; f.frequency.value=1800;
+  const g2 = audioCtx.createGain();
+  g2.gain.setValueAtTime(0.35, t);
+  g2.gain.exponentialRampToValueAtTime(0.001, t+0.08);
+  src.connect(f); f.connect(g2); g2.connect(master);
+  src.start(t);
+}
+function playPlaceSound(){
+  if(!soundEnabled) return;
+  ensureAudio();
+  if(!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const master = audioCtx.createGain();
+  master.gain.value = 0.42;
+  master.connect(audioCtx.destination);
+  // клик установки — выше тона, короткий
+  const osc = audioCtx.createOscillator();
+  osc.type='triangle';
+  osc.frequency.setValueAtTime(320, t);
+  osc.frequency.linearRampToValueAtTime(460, t+0.07);
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.5, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t+0.12);
+  osc.connect(gain); gain.connect(master);
+  osc.start(t); osc.stop(t+0.12);
+  // второй слой
+  const osc2 = audioCtx.createOscillator();
+  osc2.type='sine';
+  osc2.frequency.setValueAtTime(700, t);
+  osc2.frequency.linearRampToValueAtTime(500, t+0.05);
+  const gain2 = audioCtx.createGain();
+  gain2.gain.setValueAtTime(0.22, t);
+  gain2.gain.exponentialRampToValueAtTime(0.001, t+0.06);
+  osc2.connect(gain2); gain2.connect(master);
+  osc2.start(t); osc2.stop(t+0.06);
+}
+function playDeniedSound(){
+  if(!soundEnabled) return;
+  ensureAudio();
+  if(!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  o.type='sine'; o.frequency.setValueAtTime(120, t);
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.3, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.15);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(t); o.stop(t+0.15);
+}
+
+// ---------- BLOCK INTERACTION (полноценное) ----------
+// Проверяет границы, дубликаты и AABB-пересечение с телом игрока.
 function canPlaceAt(x, y, z) {
-  if (getBlock(x, y, z)) return false;
-  // prevent placing inside player
-  const px = player.pos.x, py = player.pos.y, pz = player.pos.z;
-  // player bbox
-  const pMinX = px - PLAYER_WIDTH / 2, pMaxX = px + PLAYER_WIDTH / 2;
-  const pMinY = py - PLAYER_HEIGHT, pMaxY = py; // actually pos is eye height? Let's check our representation: pos is eye position? No we maintain feet?
-  // Currently we treat player.pos as feet+eye? Let's define: player.pos is camera/eye position (where camera at)
-  // In update we set camera position = player.pos, so player.pos is eye.
-  // So feet is pos.y - PLAYER_EYE_HEIGHT, head is pos.y + (PLAYER_HEIGHT - PLAYER_EYE_HEIGHT)
-  // For collision we need full body.
-  // Check AABB overlap with block
-  const feetY = py - PLAYER_EYE_HEIGHT;
+  if (!isInsideWorld(x, y, z) || getBlock(x, y, z)) return false;
+
+  const feetY = player.pos.y - PLAYER_EYE_HEIGHT;
   const headY = feetY + PLAYER_HEIGHT;
-  const bMinX = x, bMaxX = x + 1;
-  const bMinY = y, bMaxY = y + 1;
-  const bMinZ = z, bMaxZ = z + 1;
-  if (pMaxX < bMinX || pMinX > bMaxX) return true;
-  if (headY < bMinY || feetY > bMaxY) return true;
-  if (pz + PLAYER_WIDTH/2 < bMinZ || pz - PLAYER_WIDTH/2 > bMaxZ) return true;
-  // overlapping -> can't place
-  return false;
+  const playerMinX = player.pos.x - PLAYER_WIDTH / 2;
+  const playerMaxX = player.pos.x + PLAYER_WIDTH / 2;
+  const playerMinZ = player.pos.z - PLAYER_WIDTH / 2;
+  const playerMaxZ = player.pos.z + PLAYER_WIDTH / 2;
+
+  const overlapsX = playerMinX < x + 1 && playerMaxX > x;
+  const overlapsY = feetY < y + 1 && headY > y;
+  const overlapsZ = playerMinZ < z + 1 && playerMaxZ > z;
+  return !(overlapsX && overlapsY && overlapsZ);
 }
 
-// Breaking and placing with cooldown to avoid repeat
+// Cooldowns also protect repeated mouse/touch input and avoid duplicate updates.
 let breakCooldown = 0, placeCooldown = 0;
 function tryBreak() {
-  if (!currentHit || breakCooldown > 0) return;
-  // don't allow breaking bedrock-like? But all breakable
-  const { bx, by, bz } = currentHit;
-  // prevent breaking block under player feet that would cause falling through? allowed
+  if (menuVisible || !currentHit || currentHit.distance > INTERACTION_RANGE || breakCooldown > 0) return;
+  const { bx, by, bz, mesh } = currentHit;
+  const entry = getBlock(bx, by, bz);
+  if (!entry || entry.mesh !== mesh) return; // уже удалён или устаревший raycast-hit
+  if (isUnbreakable(entry.type)) {
+    playDeniedSound();
+    breakCooldown = 0.18;
+    return;
+  }
+
+  spawnBreakParticles(bx, by, bz, entry.type);
+  playBreakSound(entry.type);
   if (removeBlockMesh(bx, by, bz)) {
     breakCooldown = 0.15;
     updateHudBlocks();
-    // punch animation (camera shake)
-    camera.position.x += (Math.random()-0.5)*0.04;
+    // Preserve the existing small punch/camera feedback on a successful break.
+    camera.position.x += (Math.random() - 0.5) * 0.04;
   }
 }
 function tryPlace() {
-  if (!currentHit || placeCooldown > 0) return;
-  const { bx, by, bz, faceNormal } = currentHit;
+  if (menuVisible || !currentHit || currentHit.distance > INTERACTION_RANGE || placeCooldown > 0) return;
+  const { bx, by, bz, faceNormal, mesh } = currentHit;
+  const target = getBlock(bx, by, bz);
+  if (!target || target.mesh !== mesh) return; // target could have been broken this frame
+
   const nx = bx + faceNormal.x;
   const ny = by + faceNormal.y;
   const nz = bz + faceNormal.z;
-  if (!canPlaceAt(nx, ny, nz)) {
-    // still allow if not colliding? show fail
+  if (!isInsideWorld(nx, ny, nz)) {
+    playDeniedSound();
+    placeCooldown = 0.12;
     return;
   }
-  const type = BLOCK_LIST[selectedIndex].id;
-  createBlockMesh(nx, ny, nz, type);
-  placeCooldown = 0.16;
-  updateHudBlocks();
+  if (!canPlaceAt(nx, ny, nz)) {
+    if (!getBlock(nx, ny, nz)) playDeniedSound();
+    placeCooldown = 0.12;
+    return;
+  }
+
+  const blockType = BLOCK_LIST[selectedIndex]?.id;
+  if (!blockType || isUnbreakable(blockType)) return;
+  // createBlockMesh atomically adds the block to world data, raycasts and collision checks.
+  if (createBlockMesh(nx, ny, nz, blockType)) {
+    playPlaceSound();
+    placeCooldown = 0.16;
+    updateHudBlocks();
+  }
 }
 
-// mouse events
+// Mouse actions are accepted only in the active, pointer-locked game.
 renderer.domElement.addEventListener('mousedown', (e) => {
   if (menuVisible || !isPointerLocked) return;
-  if (e.button === 0) tryBreak();
-  if (e.button === 2) tryPlace();
+  if (e.button === 0) {
+    mouseDownLeft = true;
+    tryBreak();
+  } else if (e.button === 2) {
+    e.preventDefault();
+    mouseDownRight = true;
+    tryPlace();
+  }
 });
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
-
-// also hold?
-let mouseDownLeft = false, mouseDownRight = false;
-renderer.domElement.addEventListener('mousedown', e => {
-  if (e.button === 0) mouseDownLeft = true;
-  if (e.button === 2) mouseDownRight = true;
-});
-window.addEventListener('mouseup', e => {
+window.addEventListener('mouseup', (e) => {
   if (e.button === 0) mouseDownLeft = false;
   if (e.button === 2) mouseDownRight = false;
+});
+window.addEventListener('blur', () => {
+  mouseDownLeft = false;
+  mouseDownRight = false;
+  for (const code of Object.keys(keys)) keys[code] = false;
 });
 
 // ---------- PHYSICS & COLLISION ----------
@@ -1014,22 +1286,20 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.05); // cap
 
   if (!menuVisible) {
-    if (isPointerLocked) {
-      moveAndCollide(dt);
-      // cooldowns
-      if (breakCooldown > 0) breakCooldown -= dt;
-      if (placeCooldown > 0) placeCooldown -= dt;
-      // auto repeat if holding
-      if (mouseDownLeft && breakCooldown <= 0) tryBreak();
-      if (mouseDownRight && placeCooldown <= 0) tryPlace();
-    }
-    // update camera from player
+    breakCooldown = Math.max(0, breakCooldown - dt);
+    placeCooldown = Math.max(0, placeCooldown - dt);
+    if (isPointerLocked) moveAndCollide(dt);
+
+    // Update camera/ray first so held actions always use the block under the current crosshair.
     camera.position.copy(player.pos);
     camera.rotation.order = 'YXZ';
     camera.rotation.y = player.yaw;
     camera.rotation.x = player.pitch;
-
     updateRaycast();
+
+    // Hold-to-repeat for desktop; touch controls call tryBreak/tryPlace on tap.
+    if (isPointerLocked && mouseDownLeft && breakCooldown <= 0) tryBreak();
+    if (isPointerLocked && mouseDownRight && placeCooldown <= 0) tryPlace();
 
     // subtle cloud drift
     clouds.position.x += dt * 0.6;
@@ -1042,6 +1312,8 @@ function animate() {
     camera.lookAt(0, 4, 0);
     updateRaycast(); // not needed but okay
   }
+
+  updateParticles(dt);
 
   // HUD throttled
   lastHudUpdate += dt;

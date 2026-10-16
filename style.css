@@ -251,8 +251,25 @@ canvas {
   background: rgba(0,0,0,0.35);
   padding: 6px 10px;
   border: 2px solid rgba(0,0,0,0.5);
-  pointer-events: none;
+  pointer-events: auto;
 }
+#soundToggle {
+  pointer-events: auto;
+  background: rgba(20,20,20,0.85);
+  color: #fff;
+  border: 2px solid #000;
+  box-shadow: inset 1px 1px 0 #555, inset -1px -1px 0 #333;
+  font-family: 'VT323', monospace;
+  font-size: 14px;
+  padding: 2px 8px;
+  cursor: pointer;
+  text-shadow: 1px 1px 0 #000;
+}
+#soundToggle.muted {
+  background: rgba(80,20,20,0.85);
+  color: #ffaaaa;
+}
+#soundToggle:hover { filter: brightness(1.15); }
 #hud-right {
   position: absolute;
   top: 10px;

@@ -21,12 +21,17 @@
     <div id="hud">
       <div>Позиция: <span id="hud-pos">0, 0, 0</span></div>
       <div>Блоков в мире: <span id="hud-blocks">0</span></div>
+      <div style="margin-top:4px; display:flex; gap:6px; align-items:center;">
+        <button id="soundToggle" title="Вкл/выкл звук (M)">🔊 Звук: вкл</button>
+        <span style="font-size:12px; opacity:0.8;">M — мьют</span>
+      </div>
     </div>
     <div id="hud-right">
       <div><b>WASD</b> — движение &nbsp; <b>Мышь</b> — обзор</div>
       <div><b>Space</b> — прыжок &nbsp; <b>Shift</b> — бег</div>
       <div><b>ЛКМ</b> — сломать &nbsp; <b>ПКМ</b> — поставить</div>
       <div><b>1-7</b> / колесо — выбор блока &nbsp; <b>ESC</b> — пауза</div>
+      <div style="margin-top:4px; font-size:12px; opacity:0.85;">Дальность: 5 блоков • <span id="hud-target">—</span></div>
     </div>
 
     <div id="crosshair"><div class="dot"></div></div>
