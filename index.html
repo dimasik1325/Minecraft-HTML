@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Minecraft HTML — Играй в браузере</title>
+  <link rel="stylesheet" href="style.css" />
+  <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="game-container">
+    <!-- HUD -->
+    <div id="hud">
+      <div>Позиция: <span id="hud-pos">0, 0, 0</span></div>
+      <div>Блоков в мире: <span id="hud-blocks">0</span></div>
+    </div>
+    <div id="hud-right">
+      <div><b>WASD</b> — движение &nbsp; <b>Мышь</b> — обзор</div>
+      <div><b>Space</b> — прыжок &nbsp; <b>Shift</b> — бег</div>
+      <div><b>ЛКМ</b> — сломать &nbsp; <b>ПКМ</b> — поставить</div>
+      <div><b>1-7</b> / колесо — выбор блока &nbsp; <b>ESC</b> — пауза</div>
+    </div>
+
+    <div id="crosshair"><div class="dot"></div></div>
+
+    <div id="hint">Нажми <b>ESC</b> чтобы выйти из прицела</div>
+
+    <div id="pause-msg">
+      <div style="font-family:'Press Start 2P',monospace; font-size:16px; margin-bottom:8px;">ПАУЗА</div>
+      <div>Кликни по экрану чтобы продолжить</div>
+      <div style="margin-top:6px; font-size:16px; color:#aaa;">Нажми <b>ESC</b> для меню</div>
+    </div>
+
+    <!-- Hotbar -->
+    <div id="hotbar"></div>
+
+    <!-- Start Menu -->
+    <div id="menu">
+      <div class="menu-card">
+        <div class="menu-title">MINECRAFT<br>HTML</div>
+        <div class="menu-subtitle">Браузерное издание • Three.js</div>
+        <div class="menu-desc">
+          Исследуй кубический мир, строй и разрушай!<br>
+          <b>7 видов блоков</b> • физика • бесконечный горизонт
+        </div>
+        <button class="btn-play" id="playBtn">▶ ИГРАТЬ</button>
+        <div class="controls-hint">
+          <div><span>WASD</span> движение</div><div><span>Мышь</span> оглядеться</div>
+          <div><span>SPACE</span> прыжок</div><div><span>SHIFT</span> бег</div>
+          <div><span>ЛКМ</span> ломать блок</div><div><span>ПКМ</span> ставить блок</div>
+          <div><span>1-7</span> выбор блока</div><div><span>ESC</span> пауза / курсор</div>
+        </div>
+        <div style="margin-top:14px; font-size:14px; color:#888;">Клик по игре захватывает мышь (Pointer Lock).<br>Разреши захват курсора для управления.</div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="game.js"></script>
+</body>
+</html>
